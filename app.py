@@ -1,240 +1,440 @@
 import os
+import re
 import datetime
+import urllib.parse
 import requests
 import gpxpy
+import folium
+from streamlit_folium import st_folium
 import streamlit as st
+from pydantic import BaseModel, Field
+from typing import List, Literal
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 # ==========================================
-# 1. CONFIGURAZIONE PAGINA WEB (Streamlit)
+# 1. CONFIGURAZIONE PAGINA E STILE CSS CUSTOM
 # ==========================================
-st.set_page_config(page_title="GripCast AI", page_icon="🏍️", layout="centered")
-st.title("🏍️ GripCast AI")
-st.markdown("Analisi meteo multi-modello (**ICON + ECMWF**) e valutazione grip per il tuo itinerario in moto.")
+st.set_page_config(page_title="GripCast AI", page_icon="🏍️", layout="wide")
+
+st.markdown("""
+<style>
+    .stage-card { background: linear-gradient(145deg, #1a1d24, #12141a); border-radius: 14px; padding: 18px 22px; margin-bottom: 14px; border: 1px solid #2b303c; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    .stage-VERDE { border-left: 7px solid #00e676; }
+    .stage-GIALLO { border-left: 7px solid #ffea00; }
+    .stage-ROSSO { border-left: 7px solid #ff1744; }
+    .metric-pill { background: #222630; border-radius: 10px; padding: 10px 12px; text-align: center; border: 1px solid #323846; }
+    .metric-label { font-size: 0.72rem; color: #9aa0a6; text-transform: uppercase; letter-spacing: 0.8px; }
+    .metric-val { font-size: 1.15rem; font-weight: 700; color: #ffffff; margin-top: 2px; }
+    .gear-card { background: #1a1d24; border: 1px solid #2d3340; border-radius: 12px; padding: 14px 10px; text-align: center; height: 100%; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+    .gear-icon { font-size: 2.2rem; margin-bottom: 6px; }
+    .gear-title { font-size: 0.75rem; color: #9aa0a6; text-transform: uppercase; letter-spacing: 0.5px; }
+    .gear-value { font-size: 0.92rem; font-weight: 600; color: #f1f3f4; margin-top: 4px; }
+    .grip-box { background: linear-gradient(145deg, #1a1d24, #14171f); border: 1px solid #2d3340; border-radius: 14px; padding: 20px; height: 100%; }
+    .grip-bar-bg { background: #2b303c; border-radius: 999px; height: 16px; width: 100%; overflow: hidden; margin: 10px 0; }
+    details > summary { list-style: none; outline: none; }
+    details > summary::-webkit-details-marker { display: none; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🏍️ GripCast AI — Telemetry & Weather")
+st.markdown("Analisi meteo multi-modello (**ICON + ECMWF**), telemetria grip asfalto e setup abbigliamento.")
 
 # ==========================================
-# 2. GESTIONE CHIAVE API (Locale + Pubblica)
+# 2. MODELLI DATI PER L'OUTPUT GRAFICO
+# ==========================================
+class TappaReport(BaseModel):
+    nome: str = Field(description="Nome della località")
+    orario: str = Field(description="Orario stimato (es. '14:00') oppure 'Intera Giornata'")
+    altitudine_m: int = Field(description="Altitudine in metri")
+    condizione: Literal["SOLE", "POCO_NUVOLOSO", "NUVOLOSO", "PIOGGIA", "TEMPORALE", "FREDDO"]
+    temp_icon: float = Field(description="Temperatura °C ICON")
+    temp_ecmwf: float = Field(description="Temperatura °C ECMWF")
+    prob_pioggia_max: int = Field(description="Probabilità pioggia %")
+    mm_pioggia_max: float = Field(description="Millimetri pioggia")
+    vento_kmh: float = Field(description="Velocità vento km/h")
+    accordo_modelli: Literal["ALTO", "MEDIO", "BASSO"]
+    livello_rischio: Literal["VERDE", "GIALLO", "ROSSO"]
+    nota_flash: str = Field(description="Frase telegrafica (max 10 parole)")
+    dettaglio_discordanza: str = Field(description="Se accordo_modelli è BASSO, spiega la differenza. Altrimenti vuoto.", default="")
+    allerta_pioggia_orari: str = Field(description="Se orario è 'Intera Giornata' e c'è pioggia, indica la fascia oraria. Altrimenti vuoto.", default="")
+
+class GripReport(BaseModel):
+    percentuale_grip: int = Field(description="Indice di tenuta da 10 a 100")
+    stato_gomme: Literal["OTTIMALE", "TIEPIDE", "FREDDE", "SCIVOLOSO_BAGNATO"]
+    condizione_asfalto: str = Field(description="Condizione asfalto (max 4 parole)")
+    consiglio_guida: str = Field(description="Consiglio pratico telegrafico (max 12 parole)")
+
+class KitAbbigliamento(BaseModel):
+    casco_visiera: str = Field(description="Es. Visiera scura")
+    giacca: str = Field(description="Es. Pelle, Traforata, Membrana")
+    strato_termico: str = Field(description="Es. Non necessario")
+    guanti: str = Field(description="Es. Estivi")
+    antipioggia: Literal["NON_SERVE", "SOTTOSELLA_PRONTO", "DA_INDOSSARE"]
+
+class AnalisiGiroCompleta(BaseModel):
+    semaforo: Literal["VERDE", "GIALLO", "ROSSO"]
+    titolo_verdetto: str = Field(description="Titolo d'impatto di max 7 parole")
+    sintesi_flash: str = Field(description="Riassunto diretto di max 20 parole")
+    grip: GripReport
+    abbigliamento: KitAbbigliamento
+    tappe: List[TappaReport]
+
+# ==========================================
+# 3. GESTIONE CHIAVE API
 # ==========================================
 load_dotenv()
 api_key = os.environ.get("GEMINI_API_KEY")
 
-# Barra laterale: permette anche ad altri utenti (se pubblichi il sito) di inserire la propria chiave
 with st.sidebar:
-    st.header("⚙️ Impostazioni")
+    st.header("⚙️ Centrale Operativa")
     if not api_key:
         api_key = st.text_input("Inserisci Gemini API Key:", type="password")
-        st.caption("Ottieni una chiave gratuita su [Google AI Studio](https://aistudio.google.com/)")
     else:
-        st.success("API Key caricata dal file `.env` locale 🔒")
-    
-    st.divider()
-    st.markdown("**Modelli Meteo Interrogati:**\n- 🏔️ **ICON (DWD):** Alta risoluzione Alpi/Italia\n- 🌍 **ECMWF:** Modello globale europeo")
+        st.success("API Key attiva dal file `.env` 🔒")
 
 if not api_key:
-    st.warning("👈 Inserisci una Gemini API Key nella barra laterale (o nel file `.env`) per usare l'app.")
+    st.warning("👈 Inserisci una Gemini API Key nella barra laterale per attivare la telemetria.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
 
 # ==========================================
-# 3. I DUE TOOL DELL'AGENTE AI
+# 4. FUNZIONI GEOCODING E METEO
 # ==========================================
-def _interroga_open_meteo(lat: float, lon: float, data_giro: str, ora_passaggio: int, nome_tappa: str, altitudine="N/D") -> dict:
-    """Funzione ausiliaria che interroga i modelli ECMWF e ICON su Open-Meteo."""
+def estrai_ora_da_testo(testo: str):
+    match = re.search(r"\b(\d{1,2})[:.]\d{2}\b", testo)
+    return int(match.group(1)) if match else None
+
+def cerca_coordinate_localita(riga_testo: str):
+    nome_pulito = re.sub(r"\(.*?\)", "", riga_testo)
+    nome_pulito = re.sub(r"\b\d{1,2}[:.]\d{2}\b", "", nome_pulito).strip(" -•,\t")
+    if not nome_pulito: return None
+    geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(nome_pulito)}&count=1&language=it&format=json"
+    try:
+        res = requests.get(geo_url, timeout=10).json()
+        if res.get("results"):
+            loc = res["results"][0]
+            return {"nome": f"{loc['name']} ({loc.get('admin1', '')})", "lat": loc["latitude"], "lon": loc["longitude"], "altitudine": int(loc.get("elevation", 0))}
+    except Exception:
+        pass
+    return None
+
+def estrai_dati_meteo(lat: float, lon: float, data_giro: str, ora_opt, nome_tappa: str, altitudine=0) -> str:
     meteo_url = "https://api.open-meteo.com/v1/forecast"
     params = {
-        "latitude": lat,
-        "longitude": lon,
+        "latitude": lat, "longitude": lon,
         "hourly": "temperature_2m,precipitation_probability,precipitation,wind_speed_10m",
         "models": "ecmwf_ifs025,icon_seamless",
-        "start_date": data_giro,
-        "end_date": data_giro,
+        "start_date": data_giro, "end_date": data_giro,
         "timezone": "Europe/Rome"
     }
-    res = requests.get(meteo_url, params=params).json()
-    hourly = res.get("hourly", {})
-    idx = max(0, min(23, ora_passaggio))
     
-    # Se l'altitudine non era nota dal geocoding, prendiamo quella del modello meteo
-    if altitudine == "N/D":
-        altitudine = res.get("elevation", "N/D")
+    hourly = {}
+    try:
+        res = requests.get(meteo_url, params=params, timeout=10).json()
+        if "error" in res:
+            st.session_state.avviso_meteo_incompleto = True
+        else:
+            hourly = res.get("hourly", {})
+            if not altitudine: altitudine = int(res.get("elevation", 0))
+    except Exception:
+        st.session_state.avviso_meteo_incompleto = True
 
-    return {
-        "tappa": nome_tappa,
-        "altitudine_m": altitudine,
-        "ora_controllata": f"{ora_passaggio:02d}:00",
-        "modello_ICON_Alpino": {
-            "temperatura_C": hourly.get("temperature_2m_icon_seamless", [None]*24)[idx],
-            "probabilita_pioggia_%": hourly.get("precipitation_probability_icon_seamless", [None]*24)[idx],
-            "mm_pioggia": hourly.get("precipitation_icon_seamless", [None]*24)[idx],
-            "vento_kmh": hourly.get("wind_speed_10m_icon_seamless", [None]*24)[idx],
-        },
-        "modello_ECMWF_Europeo": {
-            "temperatura_C": hourly.get("temperature_2m_ecmwf_ifs025", [None]*24)[idx],
-            "mm_pioggia": hourly.get("precipitation_ecmwf_ifs025", [None]*24)[idx],
-            "vento_kmh": hourly.get("wind_speed_10m_ecmwf_ifs025", [None]*24)[idx],
-        }
-    }
+    # FUNZIONE DI SICUREZZA: rileva anomalie ed evita il crash
+    def safe_get(chiave):
+        arr = hourly.get(chiave, [])
+        if len(arr) < 24:
+            st.session_state.avviso_meteo_incompleto = True
+            return [0.0] * 24
+        return arr
 
-def controlla_meteo_localita(nome_localita: str, data_giro: str, ora_passaggio: int) -> dict:
-    """
-    Usa questo tool quando conosci il NOME della città, paese o passo di montagna.
+    t_icon = safe_get('temperature_2m_icon_seamless')
+    p_prob_icon = safe_get('precipitation_probability_icon_seamless')
+    p_mm_icon = safe_get('precipitation_icon_seamless')
+    v_icon = safe_get('wind_speed_10m_icon_seamless')
     
-    Args:
-        nome_localita: Nome della tappa (es. 'Chiavenna', 'Passo dello Stelvio', 'Livigno').
-        data_giro: Data in formato YYYY-MM-DD.
-        ora_passaggio: Ora del passaggio (intero da 0 a 23).
-    """
-    geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={nome_localita}&count=1&language=it&format=json"
-    geo_res = requests.get(geo_url).json()
-    
-    if not geo_res.get("results"):
-        return {"errore": f"Località '{nome_localita}' non trovata."}
-    
-    loc = geo_res["results"][0]
-    return _interroga_open_meteo(
-        lat=loc["latitude"],
-        lon=loc["longitude"],
-        data_giro=data_giro,
-        ora_passaggio=ora_passaggio,
-        nome_tappa=f"{loc['name']} ({loc.get('admin1', '')})",
-        altitudine=loc.get("elevation", "N/D")
-    )
+    t_ecmwf = safe_get('temperature_2m_ecmwf_ifs025')
+    p_mm_ecmwf = safe_get('precipitation_ecmwf_ifs025')
+    v_ecmwf = safe_get('wind_speed_10m_ecmwf_ifs025')
 
-def controlla_meteo_coordinate(lat: float, lon: float, data_giro: str, ora_passaggio: int, nome_tappa: str) -> dict:
-    """
-    Usa questo tool quando hai già le COORDINATE GPS esatte (latitudine e longitudine) estratte da un file GPX.
+    testo = f"\n📍 Tappa: {nome_tappa} (Altitudine: {altitudine}m)\n"
     
-    Args:
-        lat: Latitudine decimale.
-        lon: Longitudine decimale.
-        data_giro: Data in formato YYYY-MM-DD.
-        ora_passaggio: Ora del passaggio (intero da 0 a 23).
-        nome_tappa: Etichetta o nome della tappa.
-    """
-    return _interroga_open_meteo(lat, lon, data_giro, ora_passaggio, nome_tappa)
+    if ora_opt is not None:
+        idx = max(0, min(23, ora_opt))
+        testo += f"Ora analizzata: {ora_opt:02d}:00\n"
+        testo += f"ICON -> Temp: {t_icon[idx]}°C | Pioggia: {p_prob_icon[idx]}%, {p_mm_icon[idx]}mm | Vento: {v_icon[idx]}km/h\n"
+        testo += f"ECMWF -> Temp: {t_ecmwf[idx]}°C | Pioggia: {p_mm_ecmwf[idx]}mm | Vento: {v_ecmwf[idx]}km/h\n"
+    else:
+        testo += "Ora analizzata: INTERA GIORNATA (fascia 08:00 - 20:00)\n"
+        for h in range(8, 21):
+            testo += f"- Ore {h:02d}:00 -> ICON (Temp: {t_icon[h]}°C, Piogg: {p_prob_icon[h]}%, {p_mm_icon[h]}mm) | ECMWF (Temp: {t_ecmwf[h]}°C, Piogg: {p_mm_ecmwf[h]}mm)\n"
+    return testo
+
+def genera_link_google_maps(punti_tappe: list) -> str:
+    if len(punti_tappe) < 2: return ""
+    origin = f"{punti_tappe[0]['lat']},{punti_tappe[0]['lon']}"
+    destination = f"{punti_tappe[-1]['lat']},{punti_tappe[-1]['lon']}"
+    url = f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&travelmode=driving"
+    if len(punti_tappe) > 2:
+        waypoints = "|".join([f"{p['lat']},{p['lon']}" for p in punti_tappe[1:-1]])
+        url += f"&waypoints={urllib.parse.quote(waypoints)}"
+    return url
+
+def disegna_mappa(punti_tappe: list, traccia_completa: list = None, report_ai: AnalisiGiroCompleta = None):
+    lat_centro = sum(p["lat"] for p in punti_tappe) / len(punti_tappe)
+    lon_centro = sum(p["lon"] for p in punti_tappe) / len(punti_tappe)
+    m = folium.Map(location=[lat_centro, lon_centro], zoom_start=9, tiles="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps")
+    coordinate_linea = traccia_completa if traccia_completa else [[p["lat"], p["lon"]] for p in punti_tappe]
+    folium.PolyLine(coordinate_linea, color="#FF4B4B", weight=5, opacity=0.85).add_to(m)
+    
+    for i, p in enumerate(punti_tappe):
+        colore, extra_info = "blue", ""
+        if report_ai and i < len(report_ai.tappe):
+            t_rep = report_ai.tappe[i]
+            colore = {"VERDE": "green", "GIALLO": "orange", "ROSSO": "red"}.get(t_rep.livello_rischio, "blue")
+            extra_info = f"<br>🌡️ {t_rep.temp_icon}°C | 🌧️ {t_rep.prob_pioggia_max}%"
+        elif i == 0: colore = "green"
+        elif i == len(punti_tappe) - 1: colore = "red"
+            
+        icona = "play" if i == 0 else ("flag-checkered" if i == len(punti_tappe) - 1 else "info-sign")
+        folium.Marker(
+            location=[p["lat"], p["lon"]], popup=folium.Popup(f"<b>{i+1}. {p['nome']}</b>{extra_info}", max_width=260),
+            tooltip=f"{i+1}. {p['nome']}", icon=folium.Icon(color=colore, icon=icona)
+        ).add_to(m)
+    m.fit_bounds([[p["lat"], p["lon"]] for p in punti_tappe])
+    return m
 
 # ==========================================
-# 4. INTERFACCIA UTENTE: SCELTA MODALITÀ
+# 5. INPUT UTENTE, ORA PARTENZA OBBLIGATORIA E STATI
 # ==========================================
-col1, col2 = st.columns(2)
-with col1:
+if "report_strutturato" not in st.session_state: st.session_state.report_strutturato = None
+if "punti_mappa" not in st.session_state: st.session_state.punti_mappa = []
+if "traccia_mappa" not in st.session_state: st.session_state.traccia_mappa = None
+if "avviso_meteo_incompleto" not in st.session_state: st.session_state.avviso_meteo_incompleto = False
+
+col_dt1, col_dt2 = st.columns(2)
+with col_dt1: 
     data_partenza = st.date_input("📅 Data del giro", datetime.date.today())
-with col2:
+with col_dt2: 
     ora_partenza = st.time_input("⏰ Ora di partenza", datetime.time(9, 0))
 
-# Creiamo le 2 schede per far scegliere all'utente come inserire il giro
 tab_manuale, tab_gpx = st.tabs(["✍️ Inserimento Manuale Tappe", "📂 Carica File .GPX"])
-
 prompt_agente = None
 
-# --- TAB 1: INSERIMENTO MANUALE ---
 with tab_manuale:
-    st.subheader("Scrivi le tappe del tuo giro")
-    st.caption("Inserisci una tappa per riga (puoi anche specificare l'orario se lo sai, altrimenti lo stimerà l'Agente partendo dall'ora di partenza).")
-    
     testo_tappe = st.text_area(
-        "Itinerario:",
-        placeholder="Esempio:\nCusano Milanino (partenza 09:00)\nLecco\nChiavenna\nPasso dello Spluga\nMadesimo",
-        height=150
+        "Scrivi le tappe (una per riga). Se inserisci l'orario a lato, analizzerà l'ora esatta, altrimenti controllerà l'intera giornata:", 
+        placeholder="Cusano Milanino\nTeglio 11:30\nAprica\nBormio\nLivigno 16:00", 
+        height=130
     )
-    
     if st.button("🚀 Analizza Tappe Manuali", type="primary", use_container_width=True):
-        if not testo_tappe.strip():
-            st.warning("Inserisci almeno una tappa prima di avviare l'analisi!")
+        righe = [r.strip() for r in testo_tappe.split("\n") if r.strip()]
+        if not righe:
+            st.warning("Inserisci almeno una tappa!")
         else:
-            prompt_agente = f"""
-            Data del giro: {data_partenza}
-            Ora di partenza iniziale: {ora_partenza.strftime('%H:%M')}
-            Tappe inserite dall'utente:
-            {testo_tappe}
-            
-            Stima l'orario di passaggio per le tappe che non hanno un orario esplicito e usa lo strumento `controlla_meteo_localita` per ogni singola tappa.
-            """
+            st.session_state.avviso_meteo_incompleto = False # Resetta l'avviso ad ogni nuova analisi
+            with st.spinner("🗺️ Download dati meteo in corso..."):
+                punti_trovati = []
+                dati_meteo_testo = ""
+                for r in righe:
+                    info = cerca_coordinate_localita(r)
+                    if info:
+                        ora_trovata = estrai_ora_da_testo(r)
+                        info['ora'] = ora_trovata
+                        punti_trovati.append(info)
+                        dati_meteo_testo += estrai_dati_meteo(info['lat'], info['lon'], str(data_partenza), ora_trovata, info['nome'], info['altitudine'])
+                
+                st.session_state.punti_mappa = punti_trovati
+                st.session_state.traccia_mappa = None
+            prompt_agente = f"Data: {data_partenza}\nDati meteo grezzi estratti:\n{dati_meteo_testo}"
 
-# --- TAB 2: CARICAMENTO FILE GPX ---
 with tab_gpx:
-    st.subheader("Importa tracciato GPX")
-    st.caption("Carica un file `.gpx` esportato da Kurviger, Calimoto, Google MyMaps o dal tuo navigatore.")
+    applica_stima = st.checkbox("⏱️ Calcola l'orario di passaggio di ogni tappa in base all'ora di partenza (altrimenti valuta l'intera giornata)", value=False)
     
-    durata_stimata = st.slider("Durata totale stimata del giro (in ore):", min_value=1, max_value=12, value=4)
-    file_gpx = st.file_uploader("Seleziona il file .GPX", type=["gpx"])
-    
+    if applica_stima:
+        durata_stimata = st.slider(
+            "Durata totale stimata del giro (ore):", 1, 12, 4,
+            help="I file GPX contengono solo il tracciato geografico (GPS), non gli orari. GripCast userà questa durata per calcolare a che ora ti troverai in ogni punto stradale."
+        )
+    else:
+        durata_stimata = 4
+
+    file_gpx = st.file_uploader("Trascina il file .GPX", type=["gpx"])
     if st.button("🚀 Analizza Tracciato GPX", type="primary", use_container_width=True):
-        if not file_gpx:
-            st.warning("Carica un file .gpx prima di avviare l'analisi!")
-        else:
+        if file_gpx:
+            st.session_state.avviso_meteo_incompleto = False # Resetta l'avviso ad ogni nuova analisi
             gpx = gpxpy.parse(file_gpx)
-            tappe_gpx = []
+            tappe_gpx, traccia_completa = [], []
+            for track in gpx.tracks:
+                for segment in track.segments:
+                    for idx_pt, pt in enumerate(segment.points):
+                        if idx_pt % 5 == 0: traccia_completa.append([pt.latitude, pt.longitude])
             
-            # Caso A: Il GPX contiene Waypoint con nome
             if gpx.waypoints:
-                tot_wp = len(gpx.waypoints)
                 for i, wp in enumerate(gpx.waypoints):
                     nome = wp.name if wp.name else f"Tappa {i+1}"
-                    fraz = i / max(1, tot_wp - 1)
-                    ora_stimata = int((ora_partenza.hour + round(fraz * durata_stimata)) % 24)
-                    tappe_gpx.append({"nome": nome, "lat": wp.latitude, "lon": wp.longitude, "ora": ora_stimata})
-            
-            # Caso B: Il GPX ha solo una traccia continua -> campioniamo 5 punti equidistanti lungo il giro
+                    ora = int((ora_partenza.hour + round((i / max(1, len(gpx.waypoints) - 1)) * durata_stimata)) % 24) if applica_stima else None
+                    tappe_gpx.append({"nome": nome, "lat": wp.latitude, "lon": wp.longitude, "ora": ora})
             elif gpx.tracks and gpx.tracks[0].segments:
                 punti = gpx.tracks[0].segments[0].points
                 num_campioni = min(5, len(punti))
-                etichette = ["Partenza", "Tappa 2 (25%)", "Metà Giro (50%)", "Tappa 4 (75%)", "Arrivo"]
-                
+                etichette = ["Partenza", "Tappa 2", "Metà Giro", "Tappa 4", "Arrivo"]
                 for i in range(num_campioni):
                     idx = int(i * (len(punti) - 1) / max(1, num_campioni - 1))
-                    pt = punti[idx]
-                    fraz = i / max(1, num_campioni - 1)
-                    ora_stimata = int((ora_partenza.hour + round(fraz * durata_stimata)) % 24)
-                    tappe_gpx.append({
-                        "nome": etichette[i] if num_campioni == 5 else f"Punto {i+1}",
-                        "lat": pt.latitude,
-                        "lon": pt.longitude,
-                        "ora": ora_stimata
-                    })
+                    ora = int((ora_partenza.hour + round((i / max(1, num_campioni - 1)) * durata_stimata)) % 24) if applica_stima else None
+                    tappe_gpx.append({"nome": etichette[i], "lat": punti[idx].latitude, "lon": punti[idx].longitude, "ora": ora})
             
-            if not tappe_gpx:
-                st.error("Non sono riuscito a trovare coordinate valide in questo file GPX.")
-            else:
-                st.info(f"📍 Estratti {len(tappe_gpx)} punti chiave dal tracciato GPX!")
-                prompt_agente = f"Data del giro: {data_partenza}\nCoordinate tappe estratte dal GPX:\n"
-                for t in tappe_gpx:
-                    prompt_agente += f"- {t['nome']}: Lat {t['lat']:.4f}, Lon {t['lon']:.4f} (Passaggio stimato ore {t['ora']}:00)\n"
-                prompt_agente += "\nUsa lo strumento `controlla_meteo_coordinate` per ciascuno di questi punti."
+            if tappe_gpx:
+                with st.spinner("☁️ Download dati meteo del tracciato..."):
+                    st.session_state.punti_mappa = tappe_gpx
+                    st.session_state.traccia_mappa = traccia_completa if traccia_completa else None
+                    dati_meteo_testo = ""
+                    for t in tappe_gpx:
+                        dati_meteo_testo += estrai_dati_meteo(t['lat'], t['lon'], str(data_partenza), t['ora'], t['nome'])
+                        
+                prompt_agente = f"Data: {data_partenza}\nDati meteo grezzi estratti:\n{dati_meteo_testo}"
 
 # ==========================================
-# 5. CHIAMATA ALL'AGENTE AI E RISULTATO
+# 6. ESECUZIONE AGENTE JSON
 # ==========================================
 istruzioni_sistema = """
-Sei GripCast, un esperto Agente AI meteorologico per motociclisti.
-Hai a disposizione due strumenti:
-- `controlla_meteo_localita`: usalo quando l'utente inserisce i nomi delle città/passi manualmente.
-- `controlla_meteo_coordinate`: usalo quando ricevi coordinate Lat/Lon da un file GPX.
-
-Regole di analisi:
-1. Interroga SEMPRE il tool appropriato per TUTTE le tappe prima di rispondere.
-2. Confronta i due modelli (ICON Alpino e ECMWF Europeo): segnala se concordano o se c'è incertezza.
-3. Valuta la sicurezza e il grip dell'asfalto: sotto i 10-12°C segnala che le gomme faticano a scaldarsi (specialmente in quota), e con pioggia > 0.2 mm segnala asfalto bagnato/scivoloso.
-4. Mostra una **Tabella Riepilogativa** chiara con tutte le tappe, orario, altitudine, temperature, % pioggia e vento.
-5. Concludi con un **VERDETTO FINALE (🟢 SEMAFORO VERDE / 🟡 SEMAFORO GIALLO / 🔴 SEMAFORO ROSSO)** e consigli pratici sull'abbigliamento (es. antipioggia, strato termico).
+Sei GripCast, ingegnere di pista e meteorologo per motociclisti. Riceverai i dati meteo grezzi estratti.
+REGOLE FONDAMENTALI:
+1. Se l'orario è "INTERA GIORNATA", analizza i dati della fascia 08:00-20:00. Compila il campo 'allerta_pioggia_orari' dicendo a che ora è prevista pioggia. Se non piove, lascia vuoto.
+2. DISCORDANZA MODELLI: Se i mm di pioggia tra ICON ed ECMWF differiscono molto, imposta accordo_modelli su "BASSO" e compila 'dettaglio_discordanza' spiegando la differenza.
+3. Sotto i 10-12°C segnala che il grip cala.
 """
 
 if prompt_agente:
-    with st.spinner("🏍️ L'Agente GripCast sta interrogando i modelli ECMWF e ICON per tutte le tappe..."):
+    with st.spinner("🏍️ Telemetria in corso: calcolo grip asfalto e discrepanze satellitari..."):
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt_agente,
                 config=types.GenerateContentConfig(
                     system_instruction=istruzioni_sistema,
-                    tools=[controlla_meteo_localita, controlla_meteo_coordinate],
-                    temperature=0.2,
+                    response_mime_type="application/json",
+                    response_schema=AnalisiGiroCompleta,
+                    temperature=0.1,
                 ),
             )
-            st.divider()
-            st.markdown(response.text)
+            st.session_state.report_strutturato = AnalisiGiroCompleta.model_validate_json(response.text)
         except Exception as e:
-            st.error(f"Errore durante l'interrogazione dell'Agente: {e}")
+            st.error(f"Errore durante l'elaborazione telemetrica: {e}")
+
+# ==========================================
+# 7. DASHBOARD GRAFICA TELEMETRICA
+# ==========================================
+rep: AnalisiGiroCompleta = st.session_state.report_strutturato
+
+if rep:
+    st.divider()
+    
+    # POPUP AVVISO SERVER SE SI È VERIFICATO UN ERRORE O DATI MANCANTI
+    if st.session_state.get("avviso_meteo_incompleto", False):
+        st.warning("⚠️ **Avviso di Rete:** I server meteo (Open-Meteo) hanno restituito dati parziali o sono temporaneamente irraggiungibili per alcuni parametri. I valori mancanti sono stati impostati a 0 per garantirti comunque l'uso dell'app.")
+
+    colori_sem = {
+        "VERDE": ("#00e676", "rgba(0, 230, 118, 0.12)", "🟢 VIA LIBERA — CONDIZIONI OTTIMALI"),
+        "GIALLO": ("#ffea00", "rgba(255, 234, 0, 0.12)", "🟡 ATTENZIONE — CONDIZIONI VARIABILI O FREDDE"),
+        "ROSSO": ("#ff1744", "rgba(255, 23, 68, 0.12)", "🔴 SCONSIGLIATO — CRITICITÀ METEO / ASFALTO")
+    }
+    col_bordo, col_bg, badge_sem = colori_sem.get(rep.semaforo, colori_sem["GIALLO"])
+    
+    st.markdown(f"""
+    <div style="background: {col_bg}; border: 2px solid {col_bordo}; border-radius: 16px; padding: 22px; margin-bottom: 24px;">
+        <div style="font-size: 0.85rem; font-weight: 800; color: {col_bordo}; letter-spacing: 1.5px; text-transform: uppercase;">{badge_sem}</div>
+        <div style="font-size: 1.7rem; font-weight: 800; color: #ffffff; margin: 6px 0;">{rep.titolo_verdetto}</div>
+        <div style="font-size: 1.05rem; color: #d1d5db;">{rep.sintesi_flash}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_grip, col_kit = st.columns([1, 1.35])
+    with col_grip:
+        st.markdown("#### 🛞 Telemetria Grip & Pneumatici")
+        col_barra = "#00e676" if rep.grip.percentuale_grip >= 75 else ("#ffea00" if rep.grip.percentuale_grip >= 50 else "#ff1744")
+        icona_gomma = {"OTTIMALE": "🔥", "TIEPIDE": "🌤️", "FREDDE": "❄️", "SCIVOLOSO_BAGNATO": "⚠️"}.get(rep.grip.stato_gomme, "🛞")
+        
+        st.markdown(f"""
+        <div class="grip-box">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="color:#9aa0a6; font-size:0.85rem; text-transform:uppercase;">Indice Tenuta Asfalto</span>
+                <span style="font-size:1.5rem; font-weight:800; color:{col_barra};">{rep.grip.percentuale_grip}%</span>
+            </div>
+            <div class="grip-bar-bg"><div style="width:{rep.grip.percentuale_grip}%; background:{col_barra}; height:100%; border-radius:999px;"></div></div>
+            <div style="margin-top: 14px; display:flex; gap:10px; flex-wrap:wrap;">
+                <span style="background:#222630; padding:6px 12px; border-radius:8px; font-size:0.85rem;">{icona_gomma} <b>Mescola:</b> {rep.grip.stato_gomme.replace('_', ' ')}</span>
+                <span style="background:#222630; padding:6px 12px; border-radius:8px; font-size:0.85rem;">🛣️ <b>Fondo:</b> {rep.grip.condizione_asfalto}</span>
+            </div>
+            <div style="margin-top: 14px; font-size:0.92rem; color:#e5e7eb; border-top:1px solid #2d3340; padding-top:10px;">💡 <i>{rep.grip.consiglio_guida}</i></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_kit:
+        st.markdown("#### 🧥 Setup Abbigliamento Consigliato")
+        g1, g2, g3, g4, g5 = st.columns(5)
+        badge_rain = {"NON_SERVE": ("☀️", "Non serve"), "SOTTOSELLA_PRONTO": ("🎒", "Nel sottosella"), "DA_INDOSSARE": ("🌧️", "Indossare!")}.get(rep.abbigliamento.antipioggia, ("🎒", "Pronto"))
+        
+        items_gear = [(g1, "🪖", "Casco", rep.abbigliamento.casco_visiera), (g2, "🧥", "Giacca", rep.abbigliamento.giacca), (g3, "🌡️", "Termico", rep.abbigliamento.strato_termico), (g4, "🧤", "Guanti", rep.abbigliamento.guanti), (g5, badge_rain[0], "Antipioggia", badge_rain[1])]
+        for col_g, ico, tit, val in items_gear:
+            with col_g:
+                st.markdown(f'<div class="gear-card"><div class="gear-icon">{ico}</div><div class="gear-title">{tit}</div><div class="gear-value">{val}</div></div>', unsafe_allow_html=True)
+
+    st.write("")
+    
+    col_mappa, col_tappe = st.columns([1.05, 1.25])
+    with col_mappa:
+        st.markdown("#### 🗺️ Tracciato GPS & Rischio Tappe")
+        if st.session_state.punti_mappa:
+            mappa = disegna_mappa(st.session_state.punti_mappa, st.session_state.traccia_mappa, rep)
+            st_folium(mappa, use_container_width=True, height=480, returned_objects=[])
+            gmaps_url = genera_link_google_maps(st.session_state.punti_mappa)
+            if gmaps_url: st.link_button("📍 Apri Navigazione su Google Maps", gmaps_url, use_container_width=True)
+
+    with col_tappe:
+        st.markdown("#### 🏁 Telemetria Tappa per Tappa")
+        icone_meteo = {"SOLE": "☀️", "POCO_NUVOLOSO": "🌤️", "NUVOLOSO": "☁️", "PIOGGIA": "🌧️", "TEMPORALE": "⛈️", "FREDDO": "❄️"}
+        badge_accordo = {"ALTO": ("#00e676", "Modelli Concordi"), "MEDIO": ("#ffea00", "Incertezza Media"), "BASSO": ("#ff1744", "Modelli Discordi")}
+        
+        for idx, t in enumerate(rep.tappe):
+            ico_m = icone_meteo.get(t.condizione, "🌤️")
+            col_acc, txt_acc = badge_accordo.get(t.accordo_modelli, ("#9aa0a6", ""))
+            
+            html_card = f"""
+            <div class="stage-card stage-{t.livello_rischio}">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <div><span style="font-size:1.25rem; font-weight:800; color:#ffffff;">{ico_m} {idx+1}. {t.nome}</span><span style="background:#2b303c; color:#d1d5db; padding:3px 9px; border-radius:6px; font-size:0.78rem; margin-left:8px;">⛰️ {t.altitudine_m} m</span></div>
+                    <div style="text-align:right;"><span style="background:#222630; border:1px solid #3c4252; padding:4px 10px; border-radius:8px; font-weight:700; color:#60a5fa;">🕒 {t.orario}</span></div>
+                </div>
+                <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; margin-bottom:10px;">
+                    <div class="metric-pill"><div class="metric-label">🌡️ ICON/ECMWF</div><div class="metric-val">{t.temp_icon:.1f}° / {t.temp_ecmwf:.1f}°</div></div>
+                    <div class="metric-pill"><div class="metric-label">🌧️ Prob. Pioggia</div><div class="metric-val">{t.prob_pioggia_max}%</div></div>
+                    <div class="metric-pill"><div class="metric-label">💧 Precipitazioni</div><div class="metric-val">{t.mm_pioggia_max:.1f} mm</div></div>
+                    <div class="metric-pill"><div class="metric-label">💨 Vento</div><div class="metric-val">{t.vento_kmh:.0f} km/h</div></div>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.86rem; color:#d1d5db; padding-top:4px;">
+                    <span>💬 <i>{t.nota_flash}</i></span><span style="color:{col_acc}; font-weight:600; font-size:0.78rem;">● {txt_acc}</span>
+                </div>
+            """
+            
+            if t.allerta_pioggia_orari:
+                html_card += f"""
+                <div style="margin-top: 12px; background: rgba(0, 191, 255, 0.1); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(0, 191, 255, 0.3); font-size: 0.85rem; color: #87cefa;">
+                    ☔ <b>Allerta Pioggia:</b> {t.allerta_pioggia_orari}
+                </div>
+                """
+                
+            if t.accordo_modelli == "BASSO" and t.dettaglio_discordanza:
+                html_card += f"""
+                <details style="margin-top: 12px; background: #222630; padding: 10px 12px; border-radius: 8px; border: 1px solid #3c4252;">
+                    <summary style="cursor: pointer; color: #ffea00; font-weight: 600; font-size: 0.85rem;">⚠️ Modelli Discordi (Clicca per espandere i dettagli)</summary>
+                    <div style="margin-top: 8px; font-size: 0.85rem; color: #d1d5db; line-height: 1.4;">
+                        {t.dettaglio_discordanza}
+                    </div>
+                </details>
+                """
+
+            html_card += "</div>"
+            st.markdown(html_card, unsafe_allow_html=True)

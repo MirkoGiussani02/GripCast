@@ -3,3 +3,5 @@ requests
 python-dotenv
 streamlit
 gpxpy
+folium
+streamlit-folium
