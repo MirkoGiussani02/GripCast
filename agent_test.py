@@ -100,7 +100,7 @@ Dimmi che tempo trovo e se mi conviene andare!
 print("Avvio di GripCast AI in corso...\n")
 
 response = client.models.generate_content(
-    model="gemini-2.5-flash", # Puoi usare anche gemini-3.1-pro-preview col tuo piano Pro!
+    model="gemini-2.5-flash", # Puoi usare anche gemini-3.1-pro-preview col piano Pro!
     contents=richiesta_utente,
     config=types.GenerateContentConfig(
         system_instruction=istruzioni_sistema,
