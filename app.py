@@ -57,8 +57,8 @@ class TappaReport(BaseModel):
     accordo_modelli: Literal["ALTO", "MEDIO", "BASSO"]
     livello_rischio: Literal["VERDE", "GIALLO", "ROSSO"]
     nota_flash: str = Field(description="Frase telegrafica (max 10 parole)")
-    dettaglio_discordanza: str = Field(description="Se accordo_modelli è BASSO, spiega la differenza. Altrimenti vuoto.", default="")
-    allerta_pioggia_orari: str = Field(description="Se orario è 'Intera Giornata' e c'è pioggia, indica la fascia oraria. Altrimenti vuoto.", default="")
+    dettaglio_discordanza: str = Field(description="Se accordo_modelli è BASSO, spiega la differenza (es. 'ICON prevede 80% pioggia alle 14, ECMWF 10%'). Altrimenti vuoto.", default="")
+    allerta_pioggia_orari: str = Field(description="Se orario è 'Intera Giornata' e c'è pioggia, indica gli orari ESATTI (es. 'Pioggia tra le 14:00 e le 16:00'). Altrimenti vuoto.", default="")
 
 class GripReport(BaseModel):
     percentuale_grip: int = Field(description="Indice di tenuta da 10 a 100")
@@ -142,7 +142,6 @@ def estrai_dati_meteo(lat: float, lon: float, data_giro: str, ora_opt, nome_tapp
     except Exception:
         st.session_state.avviso_meteo_incompleto = True
 
-    # FUNZIONE DI SICUREZZA: rileva anomalie ed evita il crash
     def safe_get(chiave):
         arr = hourly.get(chiave, [])
         if len(arr) < 24:
@@ -207,7 +206,7 @@ def disegna_mappa(punti_tappe: list, traccia_completa: list = None, report_ai: A
     return m
 
 # ==========================================
-# 5. INPUT UTENTE, ORA PARTENZA OBBLIGATORIA E STATI
+# 5. INPUT UTENTE E STATI
 # ==========================================
 if "report_strutturato" not in st.session_state: st.session_state.report_strutturato = None
 if "punti_mappa" not in st.session_state: st.session_state.punti_mappa = []
@@ -234,7 +233,7 @@ with tab_manuale:
         if not righe:
             st.warning("Inserisci almeno una tappa!")
         else:
-            st.session_state.avviso_meteo_incompleto = False # Resetta l'avviso ad ogni nuova analisi
+            st.session_state.avviso_meteo_incompleto = False 
             with st.spinner("🗺️ Download dati meteo in corso..."):
                 punti_trovati = []
                 dati_meteo_testo = ""
@@ -264,7 +263,7 @@ with tab_gpx:
     file_gpx = st.file_uploader("Trascina il file .GPX", type=["gpx"])
     if st.button("🚀 Analizza Tracciato GPX", type="primary", use_container_width=True):
         if file_gpx:
-            st.session_state.avviso_meteo_incompleto = False # Resetta l'avviso ad ogni nuova analisi
+            st.session_state.avviso_meteo_incompleto = False 
             gpx = gpxpy.parse(file_gpx)
             tappe_gpx, traccia_completa = [], []
             for track in gpx.tracks:
@@ -302,8 +301,8 @@ with tab_gpx:
 istruzioni_sistema = """
 Sei GripCast, ingegnere di pista e meteorologo per motociclisti. Riceverai i dati meteo grezzi estratti.
 REGOLE FONDAMENTALI:
-1. Se l'orario è "INTERA GIORNATA", analizza i dati della fascia 08:00-20:00. Compila il campo 'allerta_pioggia_orari' dicendo a che ora è prevista pioggia. Se non piove, lascia vuoto.
-2. DISCORDANZA MODELLI: Se i mm di pioggia tra ICON ed ECMWF differiscono molto, imposta accordo_modelli su "BASSO" e compila 'dettaglio_discordanza' spiegando la differenza.
+1. Se l'orario è "INTERA GIORNATA", analizza i dati della fascia 08:00-20:00. Compila il campo 'allerta_pioggia_orari' indicando le fasce orarie ESATTE in cui è prevista pioggia (es. "Forti rovesci tra le 14:00 e le 16:00, pioviggine alle 18:00"). NON scrivere genericamente "dalle 08:00 alle 20:00". Se non piove, lascia vuoto.
+2. DISCORDANZA MODELLI: Se la probabilità di pioggia differisce di OLTRE IL 50% tra ICON ed ECMWF (oppure c'è una netta discrepanza sui mm), imposta accordo_modelli su "BASSO" e compila 'dettaglio_discordanza' spiegando la differenza tecnica.
 3. Sotto i 10-12°C segnala che il grip cala.
 """
 
@@ -332,7 +331,6 @@ rep: AnalisiGiroCompleta = st.session_state.report_strutturato
 if rep:
     st.divider()
     
-    # POPUP AVVISO SERVER SE SI È VERIFICATO UN ERRORE O DATI MANCANTI
     if st.session_state.get("avviso_meteo_incompleto", False):
         st.warning("⚠️ **Avviso di Rete:** I server meteo (Open-Meteo) hanno restituito dati parziali o sono temporaneamente irraggiungibili per alcuni parametri. I valori mancanti sono stati impostati a 0 per garantirti comunque l'uso dell'app.")
 
@@ -343,13 +341,7 @@ if rep:
     }
     col_bordo, col_bg, badge_sem = colori_sem.get(rep.semaforo, colori_sem["GIALLO"])
     
-    st.markdown(f"""
-    <div style="background: {col_bg}; border: 2px solid {col_bordo}; border-radius: 16px; padding: 22px; margin-bottom: 24px;">
-        <div style="font-size: 0.85rem; font-weight: 800; color: {col_bordo}; letter-spacing: 1.5px; text-transform: uppercase;">{badge_sem}</div>
-        <div style="font-size: 1.7rem; font-weight: 800; color: #ffffff; margin: 6px 0;">{rep.titolo_verdetto}</div>
-        <div style="font-size: 1.05rem; color: #d1d5db;">{rep.sintesi_flash}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div style="background: {col_bg}; border: 2px solid {col_bordo}; border-radius: 16px; padding: 22px; margin-bottom: 24px;"><div style="font-size: 0.85rem; font-weight: 800; color: {col_bordo}; letter-spacing: 1.5px; text-transform: uppercase;">{badge_sem}</div><div style="font-size: 1.7rem; font-weight: 800; color: #ffffff; margin: 6px 0;">{rep.titolo_verdetto}</div><div style="font-size: 1.05rem; color: #d1d5db;">{rep.sintesi_flash}</div></div>', unsafe_allow_html=True)
 
     col_grip, col_kit = st.columns([1, 1.35])
     with col_grip:
@@ -357,20 +349,7 @@ if rep:
         col_barra = "#00e676" if rep.grip.percentuale_grip >= 75 else ("#ffea00" if rep.grip.percentuale_grip >= 50 else "#ff1744")
         icona_gomma = {"OTTIMALE": "🔥", "TIEPIDE": "🌤️", "FREDDE": "❄️", "SCIVOLOSO_BAGNATO": "⚠️"}.get(rep.grip.stato_gomme, "🛞")
         
-        st.markdown(f"""
-        <div class="grip-box">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="color:#9aa0a6; font-size:0.85rem; text-transform:uppercase;">Indice Tenuta Asfalto</span>
-                <span style="font-size:1.5rem; font-weight:800; color:{col_barra};">{rep.grip.percentuale_grip}%</span>
-            </div>
-            <div class="grip-bar-bg"><div style="width:{rep.grip.percentuale_grip}%; background:{col_barra}; height:100%; border-radius:999px;"></div></div>
-            <div style="margin-top: 14px; display:flex; gap:10px; flex-wrap:wrap;">
-                <span style="background:#222630; padding:6px 12px; border-radius:8px; font-size:0.85rem;">{icona_gomma} <b>Mescola:</b> {rep.grip.stato_gomme.replace('_', ' ')}</span>
-                <span style="background:#222630; padding:6px 12px; border-radius:8px; font-size:0.85rem;">🛣️ <b>Fondo:</b> {rep.grip.condizione_asfalto}</span>
-            </div>
-            <div style="margin-top: 14px; font-size:0.92rem; color:#e5e7eb; border-top:1px solid #2d3340; padding-top:10px;">💡 <i>{rep.grip.consiglio_guida}</i></div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f'<div class="grip-box"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="color:#9aa0a6; font-size:0.85rem; text-transform:uppercase;">Indice Tenuta Asfalto</span><span style="font-size:1.5rem; font-weight:800; color:{col_barra};">{rep.grip.percentuale_grip}%</span></div><div class="grip-bar-bg"><div style="width:{rep.grip.percentuale_grip}%; background:{col_barra}; height:100%; border-radius:999px;"></div></div><div style="margin-top: 14px; display:flex; gap:10px; flex-wrap:wrap;"><span style="background:#222630; padding:6px 12px; border-radius:8px; font-size:0.85rem;">{icona_gomma} <b>Mescola:</b> {rep.grip.stato_gomme.replace("_", " ")}</span><span style="background:#222630; padding:6px 12px; border-radius:8px; font-size:0.85rem;">🛣️ <b>Fondo:</b> {rep.grip.condizione_asfalto}</span></div><div style="margin-top: 14px; font-size:0.92rem; color:#e5e7eb; border-top:1px solid #2d3340; padding-top:10px;">💡 <i>{rep.grip.consiglio_guida}</i></div></div>', unsafe_allow_html=True)
 
     with col_kit:
         st.markdown("#### 🧥 Setup Abbigliamento Consigliato")
@@ -402,39 +381,13 @@ if rep:
             ico_m = icone_meteo.get(t.condizione, "🌤️")
             col_acc, txt_acc = badge_accordo.get(t.accordo_modelli, ("#9aa0a6", ""))
             
-            html_card = f"""
-            <div class="stage-card stage-{t.livello_rischio}">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                    <div><span style="font-size:1.25rem; font-weight:800; color:#ffffff;">{ico_m} {idx+1}. {t.nome}</span><span style="background:#2b303c; color:#d1d5db; padding:3px 9px; border-radius:6px; font-size:0.78rem; margin-left:8px;">⛰️ {t.altitudine_m} m</span></div>
-                    <div style="text-align:right;"><span style="background:#222630; border:1px solid #3c4252; padding:4px 10px; border-radius:8px; font-weight:700; color:#60a5fa;">🕒 {t.orario}</span></div>
-                </div>
-                <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; margin-bottom:10px;">
-                    <div class="metric-pill"><div class="metric-label">🌡️ ICON/ECMWF</div><div class="metric-val">{t.temp_icon:.1f}° / {t.temp_ecmwf:.1f}°</div></div>
-                    <div class="metric-pill"><div class="metric-label">🌧️ Prob. Pioggia</div><div class="metric-val">{t.prob_pioggia_max}%</div></div>
-                    <div class="metric-pill"><div class="metric-label">💧 Precipitazioni</div><div class="metric-val">{t.mm_pioggia_max:.1f} mm</div></div>
-                    <div class="metric-pill"><div class="metric-label">💨 Vento</div><div class="metric-val">{t.vento_kmh:.0f} km/h</div></div>
-                </div>
-                <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.86rem; color:#d1d5db; padding-top:4px;">
-                    <span>💬 <i>{t.nota_flash}</i></span><span style="color:{col_acc}; font-weight:600; font-size:0.78rem;">● {txt_acc}</span>
-                </div>
-            """
+            html_card = f'<div class="stage-card stage-{t.livello_rischio}"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><div><span style="font-size:1.25rem; font-weight:800; color:#ffffff;">{ico_m} {idx+1}. {t.nome}</span><span style="background:#2b303c; color:#d1d5db; padding:3px 9px; border-radius:6px; font-size:0.78rem; margin-left:8px;">⛰️ {t.altitudine_m} m</span></div><div style="text-align:right;"><span style="background:#222630; border:1px solid #3c4252; padding:4px 10px; border-radius:8px; font-weight:700; color:#60a5fa;">🕒 {t.orario}</span></div></div><div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; margin-bottom:10px;"><div class="metric-pill"><div class="metric-label">🌡️ ICON/ECMWF</div><div class="metric-val">{t.temp_icon:.1f}° / {t.temp_ecmwf:.1f}°</div></div><div class="metric-pill"><div class="metric-label">🌧️ Prob. Pioggia</div><div class="metric-val">{t.prob_pioggia_max}%</div></div><div class="metric-pill"><div class="metric-label">💧 Precipitazioni</div><div class="metric-val">{t.mm_pioggia_max:.1f} mm</div></div><div class="metric-pill"><div class="metric-label">💨 Vento</div><div class="metric-val">{t.vento_kmh:.0f} km/h</div></div></div><div style="display:flex; justify-content:space-between; align-items:center; font-size:0.86rem; color:#d1d5db; padding-top:4px;"><span>💬 <i>{t.nota_flash}</i></span><span style="color:{col_acc}; font-weight:600; font-size:0.78rem;">● {txt_acc}</span></div>'
             
             if t.allerta_pioggia_orari:
-                html_card += f"""
-                <div style="margin-top: 12px; background: rgba(0, 191, 255, 0.1); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(0, 191, 255, 0.3); font-size: 0.85rem; color: #87cefa;">
-                    ☔ <b>Allerta Pioggia:</b> {t.allerta_pioggia_orari}
-                </div>
-                """
+                html_card += f'<div style="margin-top: 12px; background: rgba(0, 191, 255, 0.1); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(0, 191, 255, 0.3); font-size: 0.85rem; color: #87cefa;">☔ <b>Allerta Pioggia:</b> {t.allerta_pioggia_orari}</div>'
                 
             if t.accordo_modelli == "BASSO" and t.dettaglio_discordanza:
-                html_card += f"""
-                <details style="margin-top: 12px; background: #222630; padding: 10px 12px; border-radius: 8px; border: 1px solid #3c4252;">
-                    <summary style="cursor: pointer; color: #ffea00; font-weight: 600; font-size: 0.85rem;">⚠️ Modelli Discordi (Clicca per espandere i dettagli)</summary>
-                    <div style="margin-top: 8px; font-size: 0.85rem; color: #d1d5db; line-height: 1.4;">
-                        {t.dettaglio_discordanza}
-                    </div>
-                </details>
-                """
+                html_card += f'<details style="margin-top: 12px; background: #222630; padding: 10px 12px; border-radius: 8px; border: 1px solid #3c4252;"><summary style="cursor: pointer; color: #ffea00; font-weight: 600; font-size: 0.85rem;">⚠️ Modelli Discordi (Clicca per espandere i dettagli)</summary><div style="margin-top: 8px; font-size: 0.85rem; color: #d1d5db; line-height: 1.4;">{t.dettaglio_discordanza}</div></details>'
 
-            html_card += "</div>"
+            html_card += '</div>'
             st.markdown(html_card, unsafe_allow_html=True)
