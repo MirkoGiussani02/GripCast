@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import datetime
 import urllib.parse
 import requests
@@ -20,6 +21,10 @@ st.set_page_config(page_title="GripCast AI", page_icon="🏍️", layout="wide")
 
 st.markdown("""
 <style>
+    /* Nascondi la sidebar e il pulsante di toggle */
+    [data-testid="stSidebar"], [data-testid="collapsedControl"] { display: none !important; }
+    /* Margini extra per centrare meglio il contenuto */
+    .block-container { padding-top: 2rem; }
     .stage-card { background: linear-gradient(145deg, #1a1d24, #12141a); border-radius: 14px; padding: 18px 22px; margin-bottom: 14px; border: 1px solid #2b303c; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
     .stage-VERDE { border-left: 7px solid #00e676; }
     .stage-GIALLO { border-left: 7px solid #ffea00; }
@@ -38,8 +43,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏍️ GripCast AI — Telemetry & Weather")
-st.markdown("Analisi meteo multi-modello (**ICON + ECMWF**), telemetria grip asfalto e setup abbigliamento.")
+_, _col_centro, _ = st.columns([1, 2, 1])
+with _col_centro:
+    st.title("🏍️ GripCast AI — Telemetry & Weather")
+    st.markdown("Analisi meteo multi-modello (**ICON + ECMWF**), telemetria grip asfalto e setup abbigliamento.")
 
 # ==========================================
 # 2. MODELLI DATI PER L'OUTPUT GRAFICO
@@ -87,16 +94,14 @@ class AnalisiGiroCompleta(BaseModel):
 load_dotenv()
 api_key = os.environ.get("GEMINI_API_KEY")
 
-with st.sidebar:
-    st.header("⚙️ Centrale Operativa")
+_, _col_api, _ = st.columns([1, 2, 1])
+with _col_api:
     if not api_key:
-        api_key = st.text_input("Inserisci Gemini API Key:", type="password")
-    else:
-        st.success("API Key attiva dal file `.env` 🔒")
+        api_key = st.text_input("🔑 Inserisci Gemini API Key:", type="password")
 
-if not api_key:
-    st.warning("👈 Inserisci una Gemini API Key nella barra laterale per attivare la telemetria.")
-    st.stop()
+    if not api_key:
+        st.warning("🔑 Inserisci una Gemini API Key qui sopra per attivare la telemetria.")
+        st.stop()
 
 client = genai.Client(api_key=api_key)
 
@@ -213,88 +218,90 @@ if "punti_mappa" not in st.session_state: st.session_state.punti_mappa = []
 if "traccia_mappa" not in st.session_state: st.session_state.traccia_mappa = None
 if "avviso_meteo_incompleto" not in st.session_state: st.session_state.avviso_meteo_incompleto = False
 
-col_dt1, col_dt2 = st.columns(2)
-with col_dt1: 
-    data_partenza = st.date_input("📅 Data del giro", datetime.date.today())
-with col_dt2: 
-    ora_partenza = st.time_input("⏰ Ora di partenza", datetime.time(9, 0))
-
-tab_manuale, tab_gpx = st.tabs(["✍️ Inserimento Manuale Tappe", "📂 Carica File .GPX"])
 prompt_agente = None
-
-with tab_manuale:
-    testo_tappe = st.text_area(
-        "Scrivi le tappe (una per riga). Se inserisci l'orario a lato, analizzerà l'ora esatta, altrimenti controllerà l'intera giornata:", 
-        placeholder="Cusano Milanino\nTeglio 11:30\nAprica\nBormio\nLivigno 16:00", 
-        height=130
-    )
-    if st.button("🚀 Analizza Tappe Manuali", type="primary", use_container_width=True):
-        righe = [r.strip() for r in testo_tappe.split("\n") if r.strip()]
-        if not righe:
-            st.warning("Inserisci almeno una tappa!")
-        else:
-            st.session_state.avviso_meteo_incompleto = False 
-            with st.spinner("🗺️ Download dati meteo in corso..."):
-                punti_trovati = []
-                dati_meteo_testo = ""
-                for r in righe:
-                    info = cerca_coordinate_localita(r)
-                    if info:
-                        ora_trovata = estrai_ora_da_testo(r)
-                        info['ora'] = ora_trovata
-                        punti_trovati.append(info)
-                        dati_meteo_testo += estrai_dati_meteo(info['lat'], info['lon'], str(data_partenza), ora_trovata, info['nome'], info['altitudine'])
-                
-                st.session_state.punti_mappa = punti_trovati
-                st.session_state.traccia_mappa = None
-            prompt_agente = f"Data: {data_partenza}\nDati meteo grezzi estratti:\n{dati_meteo_testo}"
-
-with tab_gpx:
-    applica_stima = st.checkbox("⏱️ Calcola l'orario di passaggio di ogni tappa in base all'ora di partenza (altrimenti valuta l'intera giornata)", value=False)
+_, _col_form, _ = st.columns([1, 2, 1])
+with _col_form:
+    col_dt1, col_dt2 = st.columns(2)
+    with col_dt1: 
+        data_partenza = st.date_input("📅 Data del giro", datetime.date.today())
+    with col_dt2: 
+        ora_partenza = st.time_input("⏰ Ora di partenza", datetime.time(9, 0))
     
-    if applica_stima:
-        durata_stimata = st.slider(
-            "Durata totale stimata del giro (ore):", 1, 12, 4,
-            help="I file GPX contengono solo il tracciato geografico (GPS), non gli orari. GripCast userà questa durata per calcolare a che ora ti troverai in ogni punto stradale."
+    tab_manuale, tab_gpx = st.tabs(["✍️ Inserimento Manuale Tappe", "📂 Carica File .GPX"])
+    
+    with tab_manuale:
+        testo_tappe = st.text_area(
+            "Scrivi le tappe (una per riga). Se inserisci l'orario a lato, analizzerà l'ora esatta, altrimenti controllerà l'intera giornata:", 
+            placeholder="Cusano Milanino\nTeglio 11:30\nAprica\nBormio\nLivigno 16:00", 
+            height=130
         )
-    else:
-        durata_stimata = 4
-
-    file_gpx = st.file_uploader("Trascina il file .GPX", type=["gpx"])
-    if st.button("🚀 Analizza Tracciato GPX", type="primary", use_container_width=True):
-        if file_gpx:
-            st.session_state.avviso_meteo_incompleto = False 
-            gpx = gpxpy.parse(file_gpx)
-            tappe_gpx, traccia_completa = [], []
-            for track in gpx.tracks:
-                for segment in track.segments:
-                    for idx_pt, pt in enumerate(segment.points):
-                        if idx_pt % 5 == 0: traccia_completa.append([pt.latitude, pt.longitude])
-            
-            if gpx.waypoints:
-                for i, wp in enumerate(gpx.waypoints):
-                    nome = wp.name if wp.name else f"Tappa {i+1}"
-                    ora = int((ora_partenza.hour + round((i / max(1, len(gpx.waypoints) - 1)) * durata_stimata)) % 24) if applica_stima else None
-                    tappe_gpx.append({"nome": nome, "lat": wp.latitude, "lon": wp.longitude, "ora": ora})
-            elif gpx.tracks and gpx.tracks[0].segments:
-                punti = gpx.tracks[0].segments[0].points
-                num_campioni = min(5, len(punti))
-                etichette = ["Partenza", "Tappa 2", "Metà Giro", "Tappa 4", "Arrivo"]
-                for i in range(num_campioni):
-                    idx = int(i * (len(punti) - 1) / max(1, num_campioni - 1))
-                    ora = int((ora_partenza.hour + round((i / max(1, num_campioni - 1)) * durata_stimata)) % 24) if applica_stima else None
-                    tappe_gpx.append({"nome": etichette[i], "lat": punti[idx].latitude, "lon": punti[idx].longitude, "ora": ora})
-            
-            if tappe_gpx:
-                with st.spinner("☁️ Download dati meteo del tracciato..."):
-                    st.session_state.punti_mappa = tappe_gpx
-                    st.session_state.traccia_mappa = traccia_completa if traccia_completa else None
+        if st.button("🚀 Analizza Tappe Manuali", type="primary", use_container_width=True):
+            righe = [r.strip() for r in testo_tappe.split("\n") if r.strip()]
+            if not righe:
+                st.warning("Inserisci almeno una tappa!")
+            else:
+                st.session_state.avviso_meteo_incompleto = False 
+                with st.spinner("🗺️ Download dati meteo in corso..."):
+                    punti_trovati = []
                     dati_meteo_testo = ""
-                    for t in tappe_gpx:
-                        dati_meteo_testo += estrai_dati_meteo(t['lat'], t['lon'], str(data_partenza), t['ora'], t['nome'])
-                        
+                    for r in righe:
+                        info = cerca_coordinate_localita(r)
+                        if info:
+                            ora_trovata = estrai_ora_da_testo(r)
+                            info['ora'] = ora_trovata
+                            punti_trovati.append(info)
+                            dati_meteo_testo += estrai_dati_meteo(info['lat'], info['lon'], str(data_partenza), ora_trovata, info['nome'], info['altitudine'])
+                    
+                    st.session_state.punti_mappa = punti_trovati
+                    st.session_state.traccia_mappa = None
                 prompt_agente = f"Data: {data_partenza}\nDati meteo grezzi estratti:\n{dati_meteo_testo}"
-
+    
+    with tab_gpx:
+        applica_stima = st.checkbox("⏱️ Calcola l'orario di passaggio di ogni tappa in base all'ora di partenza (altrimenti valuta l'intera giornata)", value=False)
+        
+        if applica_stima:
+            durata_stimata = st.slider(
+                "Durata totale stimata del giro (ore):", 1, 12, 4,
+                help="I file GPX contengono solo il tracciato geografico (GPS), non gli orari. GripCast userà questa durata per calcolare a che ora ti troverai in ogni punto stradale."
+            )
+        else:
+            durata_stimata = 4
+    
+        file_gpx = st.file_uploader("Trascina il file .GPX", type=["gpx"])
+        if st.button("🚀 Analizza Tracciato GPX", type="primary", use_container_width=True):
+            if file_gpx:
+                st.session_state.avviso_meteo_incompleto = False 
+                gpx = gpxpy.parse(file_gpx)
+                tappe_gpx, traccia_completa = [], []
+                for track in gpx.tracks:
+                    for segment in track.segments:
+                        for idx_pt, pt in enumerate(segment.points):
+                            if idx_pt % 5 == 0: traccia_completa.append([pt.latitude, pt.longitude])
+                
+                if gpx.waypoints:
+                    for i, wp in enumerate(gpx.waypoints):
+                        nome = wp.name if wp.name else f"Tappa {i+1}"
+                        ora = int((ora_partenza.hour + round((i / max(1, len(gpx.waypoints) - 1)) * durata_stimata)) % 24) if applica_stima else None
+                        tappe_gpx.append({"nome": nome, "lat": wp.latitude, "lon": wp.longitude, "ora": ora})
+                elif gpx.tracks and gpx.tracks[0].segments:
+                    punti = gpx.tracks[0].segments[0].points
+                    num_campioni = min(5, len(punti))
+                    etichette = ["Partenza", "Tappa 2", "Metà Giro", "Tappa 4", "Arrivo"]
+                    for i in range(num_campioni):
+                        idx = int(i * (len(punti) - 1) / max(1, num_campioni - 1))
+                        ora = int((ora_partenza.hour + round((i / max(1, num_campioni - 1)) * durata_stimata)) % 24) if applica_stima else None
+                        tappe_gpx.append({"nome": etichette[i], "lat": punti[idx].latitude, "lon": punti[idx].longitude, "ora": ora})
+                
+                if tappe_gpx:
+                    with st.spinner("☁️ Download dati meteo del tracciato..."):
+                        st.session_state.punti_mappa = tappe_gpx
+                        st.session_state.traccia_mappa = traccia_completa if traccia_completa else None
+                        dati_meteo_testo = ""
+                        for t in tappe_gpx:
+                            dati_meteo_testo += estrai_dati_meteo(t['lat'], t['lon'], str(data_partenza), t['ora'], t['nome'])
+                            
+                    prompt_agente = f"Data: {data_partenza}\nDati meteo grezzi estratti:\n{dati_meteo_testo}"
+    
 # ==========================================
 # 6. ESECUZIONE AGENTE JSON
 # ==========================================
@@ -306,22 +313,44 @@ REGOLE FONDAMENTALI:
 3. Sotto i 10-12°C segnala che il grip cala.
 """
 
+MODELLI_FALLBACK = ["gemini-2.5-flash", "gemini-2.0-flash"]
+MAX_TENTATIVI = 3
+
 if prompt_agente:
     with st.spinner("🏍️ Telemetria in corso: calcolo grip asfalto e discrepanze satellitari..."):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt_agente,
-                config=types.GenerateContentConfig(
-                    system_instruction=istruzioni_sistema,
-                    response_mime_type="application/json",
-                    response_schema=AnalisiGiroCompleta,
-                    temperature=0.1,
-                ),
-            )
-            st.session_state.report_strutturato = AnalisiGiroCompleta.model_validate_json(response.text)
-        except Exception as e:
-            st.error(f"Errore durante l'elaborazione telemetrica: {e}")
+        riuscito = False
+        for modello in MODELLI_FALLBACK:
+            for tentativo in range(1, MAX_TENTATIVI + 1):
+                try:
+                    response = client.models.generate_content(
+                        model=modello,
+                        contents=prompt_agente,
+                        config=types.GenerateContentConfig(
+                            system_instruction=istruzioni_sistema,
+                            response_mime_type="application/json",
+                            response_schema=AnalisiGiroCompleta,
+                            temperature=0.1,
+                        ),
+                    )
+                    st.session_state.report_strutturato = AnalisiGiroCompleta.model_validate_json(response.text)
+                    riuscito = True
+                    break
+                except Exception as e:
+                    errore_msg = str(e)
+                    if "503" in errore_msg or "UNAVAILABLE" in errore_msg or "429" in errore_msg or "RESOURCE_EXHAUSTED" in errore_msg:
+                        if tentativo < MAX_TENTATIVI:
+                            attesa = 2 ** tentativo
+                            st.toast(f"⏳ Server sovraccarico ({modello}), ritento tra {attesa}s... (tentativo {tentativo}/{MAX_TENTATIVI})")
+                            time.sleep(attesa)
+                        continue
+                    else:
+                        st.error(f"Errore durante l'elaborazione telemetrica: {e}")
+                        riuscito = True  # Non riprovare per errori non-transitori
+                        break
+            if riuscito:
+                break
+        if not riuscito:
+            st.error("⚠️ Tutti i server Gemini sono momentaneamente sovraccarichi. Riprova tra qualche minuto.")
 
 # ==========================================
 # 7. DASHBOARD GRAFICA TELEMETRICA
