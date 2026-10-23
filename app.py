@@ -218,16 +218,23 @@ if "punti_mappa" not in st.session_state: st.session_state.punti_mappa = []
 if "traccia_mappa" not in st.session_state: st.session_state.traccia_mappa = None
 if "avviso_meteo_incompleto" not in st.session_state: st.session_state.avviso_meteo_incompleto = False
 
+TAB_MANUALE = "✍️ Inserimento Manuale Tappe"
+TAB_GPX = "📂 Carica File .GPX"
 prompt_agente = None
 _, _col_form, _ = st.columns([1, 2, 1])
 with _col_form:
+    # L'ora e' disabilitata solo nel tab GPX quando la stima orari non e' attiva
+    ora_disabilitata = (
+        st.session_state.get("tab_attivo") == TAB_GPX
+        and not st.session_state.get("applica_stima", False)
+    )
     col_dt1, col_dt2 = st.columns(2)
     with col_dt1: 
         data_partenza = st.date_input("📅 Data del giro", datetime.date.today())
     with col_dt2: 
-        ora_partenza = st.time_input("⏰ Ora di partenza", datetime.time(9, 0))
+        ora_partenza = st.time_input("⏰ Ora di partenza", datetime.time(9, 0), disabled=ora_disabilitata)
     
-    tab_manuale, tab_gpx = st.tabs(["✍️ Inserimento Manuale Tappe", "📂 Carica File .GPX"])
+    tab_manuale, tab_gpx = st.tabs([TAB_MANUALE, TAB_GPX], key="tab_attivo", on_change="rerun")
     
     with tab_manuale:
         testo_tappe = st.text_area(
@@ -257,7 +264,7 @@ with _col_form:
                 prompt_agente = f"Data: {data_partenza}\nDati meteo grezzi estratti:\n{dati_meteo_testo}"
     
     with tab_gpx:
-        applica_stima = st.checkbox("⏱️ Calcola l'orario di passaggio di ogni tappa in base all'ora di partenza (altrimenti valuta l'intera giornata)", value=False)
+        applica_stima = st.checkbox("⏱️ Calcola l'orario di passaggio di ogni tappa in base all'ora di partenza (altrimenti valuta l'intera giornata)", value=False, key="applica_stima")
         
         if applica_stima:
             durata_stimata = st.slider(
