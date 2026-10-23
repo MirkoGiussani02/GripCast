@@ -41,23 +41,17 @@ Il risultato: non una previsione generica, ma una **telemetria pre-giro** pensat
 
 ### 📂 Caricamento tracciato GPX
 
-<!-- [INSERISCI QUI LA GIF O IL VIDEO MP4: registra lo schermo mentre trascini un file .gpx nell'uploader, scegli la durata e avvii l'analisi. Salva il file in docs/media/gpx-upload.gif (oppure carica l'MP4 trascinandolo direttamente nell'editor di GitHub e incolla qui l'URL generato).] -->
-
 <p align="center">
   <img src="docs/media/gpx-upload.gif" alt="Caricamento di un tracciato GPX in GripCast" width="800">
 </p>
 
 ### 📊 Dashboard Telemetrica
 
-<!-- [INSERISCI QUI LO SCREENSHOT DELLA DASHBOARD: cattura il semaforo di stato, la barra "Indice Tenuta Asfalto" e il blocco abbigliamento. Salvalo come docs/media/dashboard.png] -->
-
 <p align="center">
   <img src="docs/media/dashboard.png" alt="Dashboard telemetrica di GripCast" width="800">
 </p>
 
 ### 🗺️ Mappa interattiva Folium
-
-<!-- [INSERISCI QUI LO SCREENSHOT DELLA MAPPA: cattura la mappa con il percorso, i marker delle tappe e il pulsante "Apri Navigazione su Google Maps". Salvalo come docs/media/map.png] -->
 
 <p align="center">
   <img src="docs/media/map.png" alt="Mappa interattiva Folium con percorso" width="800">
