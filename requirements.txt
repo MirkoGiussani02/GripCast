@@ -1,4 +1,5 @@
 google-genai
+pydantic
 requests
 python-dotenv
 streamlit

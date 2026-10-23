@@ -107,7 +107,7 @@ Dipendenze di supporto: `requests` (chiamate a Open-Meteo) e `python-dotenv` (ca
 
 **1. Clona il repository**
 ```bash
-git clone https://github.com/<tuo-username>/GripCast.git
+git clone https://github.com/MirkoGiussani02/GripCast.git
 cd GripCast
 ```
 

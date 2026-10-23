@@ -1,8 +1,11 @@
 import os
+import urllib.parse
 import requests
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+
+HTTP_TIMEOUT = 10
 
 # 1. Carica la API Key in modo sicuro dal file .env
 load_dotenv()
@@ -25,14 +28,18 @@ def controlla_meteo_tappa(nome_localita: str, data_giro: str, ora_passaggio: int
         data_giro: La data del giro in formato YYYY-MM-DD (es. '2026-10-18').
         ora_passaggio: L'ora del giorno (da 0 a 23) in cui il motociclista passerà da lì (es. 11 per le 11:00).
     """
-    print(f"🏍️ [TOOL ATTIVATO] L'Agente sta controllando il meteo per: {nome_localita} alle ore {ora_passaggio}:00...")
+    nome_sicuro = str(nome_localita).strip()[:80]
+    print(f"🏍️ [TOOL ATTIVATO] L'Agente sta controllando il meteo per: {nome_sicuro} alle ore {ora_passaggio}:00...")
     
     # Step A: Trova le coordinate GPS e l'altitudine della località (Geocoding gratuito)
-    geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={nome_localita}&count=1&language=it&format=json"
-    geo_res = requests.get(geo_url).json()
+    geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(nome_sicuro)}&count=1&language=it&format=json"
+    try:
+        geo_res = requests.get(geo_url, timeout=HTTP_TIMEOUT).json()
+    except Exception:
+        return {"errore": f"Impossibile contattare il servizio di geocoding per '{nome_sicuro}'."}
     
     if not geo_res.get("results"):
-        return {"errore": f"Località '{nome_localita}' non trovata."}
+        return {"errore": f"Località '{nome_sicuro}' non trovata."}
     
     loc = geo_res["results"][0]
     lat, lon = loc["latitude"], loc["longitude"]
@@ -49,17 +56,20 @@ def controlla_meteo_tappa(nome_localita: str, data_giro: str, ora_passaggio: int
         "end_date": data_giro,
         "timezone": "Europe/Rome"
     }
-    meteo_res = requests.get(meteo_url, params=params).json()
+    try:
+        meteo_res = requests.get(meteo_url, params=params, timeout=HTTP_TIMEOUT).json()
+    except Exception:
+        return {"errore": f"Impossibile scaricare i dati meteo per '{nome_sicuro}'."}
     hourly = meteo_res.get("hourly", {})
     
     # Estraiamo i dati esattamente per l'ora di passaggio (indice da 0 a 23)
-    idx = max(0, min(23, ora_passaggio))
+    idx = max(0, min(23, int(ora_passaggio)))
     
     return {
         "tappa": loc["name"],
         "regione": loc.get("admin1", ""),
         "altitudine_metri": altitudine,
-        "ora_controllata": f"{ora_passaggio}:00",
+        "ora_controllata": f"{idx}:00",
         "modello_ICON_Alpino": {
             "temperatura_C": hourly.get("temperature_2m_icon_seamless", [None]*24)[idx],
             "probabilita_pioggia_%": hourly.get("precipitation_probability_icon_seamless", [None]*24)[idx],
@@ -97,17 +107,19 @@ Le tappe sono:
 Dimmi che tempo trovo e se mi conviene andare!
 """
 
-print("Avvio di GripCast AI in corso...\n")
+if __name__ == "__main__":
+    print("Avvio di GripCast AI in corso...\n")
 
-response = client.models.generate_content(
-    model="gemini-2.5-flash", # Puoi usare anche gemini-3.1-pro-preview col piano Pro!
-    contents=richiesta_utente,
-    config=types.GenerateContentConfig(
-        system_instruction=istruzioni_sistema,
-        tools=[controlla_meteo_tappa], # <-- Qui diamo i "superpoteri" all'Agente!
-        temperature=0.2,
-    ),
-)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=richiesta_utente,
+        config=types.GenerateContentConfig(
+            system_instruction=istruzioni_sistema,
+            tools=[controlla_meteo_tappa],
+            temperature=0.2,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
 
-print("\n================ RISPOSTA DI GRIPCAST ================\n")
-print(response.text)
+    print("\n================ RISPOSTA DI GRIPCAST ================\n")
+    print(response.text)
